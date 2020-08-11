@@ -111,7 +111,13 @@ static bool simple_match(const void *a, const void *b)
 
 static bool has_binding(struct l_queue *bindings, uint16_t idx)
 {
-	return l_queue_find(bindings, simple_match, L_UINT_TO_PTR(idx)) != NULL;
+	const struct l_queue_entry *entry;
+
+	for (entry = l_queue_get_entries(bindings); entry; entry = entry->next)
+		if (L_PTR_TO_INT(entry->data) == idx)
+			return true;
+
+	return false;
 }
 
 static bool find_virt_by_label(const void *a, const void *b)
@@ -1396,13 +1402,13 @@ done:
 	return MESH_STATUS_SUCCESS;
 }
 
-int mesh_model_sub_get(struct mesh_node *node, uint16_t addr, uint32_t id,
+int mesh_model_sub_get(struct mesh_node *node, uint16_t ele_addr, uint32_t id,
 			uint8_t *buf, uint16_t buf_size, uint16_t *size)
 {
 	int16_t n;
 	struct mesh_model *mod;
 	const struct l_queue_entry *entry;
-	int ele_idx = node_get_element_idx(node, addr);
+	int ele_idx = node_get_element_idx(node, ele_addr);
 
 	if (ele_idx < 0)
 		return MESH_STATUS_INVALID_ADDRESS;
@@ -1448,7 +1454,7 @@ int mesh_model_sub_add(struct mesh_node *node, uint16_t ele_addr, uint32_t id,
 								uint16_t addr)
 {
 	struct mesh_model *mod;
-	int status, ele_idx = node_get_element_idx(node, addr);
+	int status, ele_idx = node_get_element_idx(node, ele_addr);
 
 	if (ele_idx < 0)
 		return MESH_STATUS_INVALID_ADDRESS;
@@ -1504,7 +1510,7 @@ int mesh_model_sub_ovrt(struct mesh_node *node, uint16_t ele_addr, uint32_t id,
 								uint16_t addr)
 {
 	struct mesh_model *mod;
-	int ele_idx = node_get_element_idx(node, addr);
+	int ele_idx = node_get_element_idx(node, ele_addr);
 
 	if (ele_idx < 0)
 		return MESH_STATUS_INVALID_ADDRESS;
@@ -1561,7 +1567,7 @@ int mesh_model_sub_del(struct mesh_node *node, uint16_t ele_addr, uint32_t id,
 								uint16_t addr)
 {
 	struct mesh_model *mod;
-	int ele_idx = node_get_element_idx(node, addr);
+	int ele_idx = node_get_element_idx(node, ele_addr);
 
 	if (ele_idx < 0)
 		return MESH_STATUS_INVALID_ADDRESS;
@@ -1623,10 +1629,11 @@ int mesh_model_virt_sub_del(struct mesh_node *node, uint16_t ele_addr,
 	return MESH_STATUS_SUCCESS;
 }
 
-int mesh_model_sub_del_all(struct mesh_node *node, uint16_t addr, uint32_t id)
+int mesh_model_sub_del_all(struct mesh_node *node, uint16_t ele_addr,
+								uint32_t id)
 {
 	struct mesh_model *mod;
-	int ele_idx = node_get_element_idx(node, addr);
+	int ele_idx = node_get_element_idx(node, ele_addr);
 
 	if (ele_idx < 0)
 		return MESH_STATUS_INVALID_ADDRESS;
