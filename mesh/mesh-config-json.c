@@ -169,11 +169,6 @@ static json_object *get_element_model(json_object *jnode, int ele_idx,
 	size_t len;
 	char buf[9];
 
-	if (!vendor)
-		snprintf(buf, 5, "%4.4x", (uint16_t)mod_id);
-	else
-		snprintf(buf, 9, "%8.8x", mod_id);
-
 	if (!json_object_object_get_ex(jnode, "elements", &jelements))
 		return NULL;
 
@@ -189,7 +184,7 @@ static json_object *get_element_model(json_object *jnode, int ele_idx,
 		return NULL;
 
 	if (!vendor) {
-		snprintf(buf, 5, "%4.4x", mod_id);
+		snprintf(buf, 5, "%4.4x", (uint16_t)mod_id);
 		len = 4;
 	} else {
 		snprintf(buf, 9, "%8.8x", mod_id);
@@ -842,7 +837,7 @@ bool mesh_config_app_key_del(struct mesh_config *cfg, uint16_t net_idx,
 }
 
 bool mesh_config_model_binding_add(struct mesh_config *cfg, uint16_t ele_addr,
-						bool vendor, uint32_t mod_id,
+						uint32_t mod_id, bool vendor,
 							uint16_t app_idx)
 {
 	json_object *jnode, *jmodel, *jstring, *jarray = NULL;
@@ -887,7 +882,7 @@ bool mesh_config_model_binding_add(struct mesh_config *cfg, uint16_t ele_addr,
 }
 
 bool mesh_config_model_binding_del(struct mesh_config *cfg, uint16_t ele_addr,
-						bool vendor, uint32_t mod_id,
+						uint32_t mod_id, bool vendor,
 							uint16_t app_idx)
 {
 	json_object *jnode, *jmodel, *jarray;
