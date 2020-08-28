@@ -633,6 +633,7 @@ struct mesh_net *mesh_net_new(struct mesh_node *node)
 	net->frnd_msgs = l_queue_new();
 	net->destinations = l_queue_new();
 	net->app_keys = l_queue_new();
+	net->replay_cache = l_queue_new();
 
 	if (!nets)
 		nets = l_queue_new();
@@ -1620,6 +1621,91 @@ static void outseg_to(struct l_timeout *seg_timeout, void *user_data)
 					sar->seqZero, sar->last_nak);
 }
 
+static bool match_replay_cache(const void *a, const void *b)
+{
+	const struct mesh_rpl *rpe = a;
+	uint16_t src = L_PTR_TO_UINT(b);
+
+	return src == rpe->src;
+}
+
+static bool clean_old_iv_index(void *a, void *b)
+{
+	struct mesh_rpl *rpe = a;
+	uint32_t iv_index = L_PTR_TO_UINT(b);
+
+	if (iv_index < 2)
+		return false;
+
+	if (rpe->iv_index < iv_index - 1) {
+		l_free(rpe);
+		return true;
+	}
+
+	return false;
+}
+
+static bool msg_check_replay_cache(struct mesh_net *net, uint16_t src,
+				uint16_t crpl, uint32_t seq, uint32_t iv_index)
+{
+	struct mesh_rpl *rpe;
+
+	/* If anything missing reject this message by returning true */
+	if (!net || !net->node)
+		return true;
+
+	rpe = l_queue_find(net->replay_cache, match_replay_cache,
+						L_UINT_TO_PTR(src));
+
+	if (rpe) {
+		if (iv_index > rpe->iv_index)
+			return false;
+
+		/* Return true if (iv_index | seq) too low */
+		if (iv_index < rpe->iv_index || seq <= rpe->seq) {
+			l_debug("Ignoring replayed packet");
+			return true;
+		}
+	} else if (l_queue_length(net->replay_cache) >= crpl) {
+		/* SRC not in Replay Cache... see if there is space for it */
+
+		int ret = l_queue_foreach_remove(net->replay_cache,
+				clean_old_iv_index, L_UINT_TO_PTR(iv_index));
+
+		/* Return true if no space could be freed */
+		if (!ret) {
+			l_debug("Replay cache full");
+			return true;
+		}
+	}
+
+	return false;
+}
+
+static void msg_add_replay_cache(struct mesh_net *net, uint16_t src,
+						uint32_t seq, uint32_t iv_index)
+{
+	struct mesh_rpl *rpe;
+
+	if (!net || !net->replay_cache)
+		return;
+
+	rpe = l_queue_remove_if(net->replay_cache, match_replay_cache,
+						L_UINT_TO_PTR(src));
+
+	if (!rpe) {
+		rpe = l_new(struct mesh_rpl, 1);
+		rpe->src = src;
+	}
+
+	rpe->seq = seq;
+	rpe->iv_index = iv_index;
+	rpl_put_entry(net->node, src, iv_index, seq);
+
+	/* Optimize so that most recent conversations stay earliest in cache */
+	l_queue_push_head(net->replay_cache, rpe);
+}
+
 static bool msg_rxed(struct mesh_net *net, bool frnd, uint32_t iv_index,
 					uint8_t ttl, uint32_t seq,
 					uint16_t net_idx,
@@ -1629,6 +1715,7 @@ static bool msg_rxed(struct mesh_net *net, bool frnd, uint32_t iv_index,
 					const uint8_t *data, uint16_t size)
 {
 	uint32_t seqAuth = seq_auth(seq, seqZero);
+	uint16_t crpl;
 
 	/* Sanity check seqAuth */
 	if (seqAuth > seq)
@@ -1670,8 +1757,19 @@ not_for_friend:
 	if (dst == PROXIES_ADDRESS && !net->proxy_enable)
 		return false;
 
-	return mesh_model_rx(net->node, szmic, seqAuth, seq, iv_index, net_idx,
-						src, dst, key_aid, data, size);
+	/* Don't process if already in RPL */
+	crpl = node_get_crpl(net->node);
+
+	if (msg_check_replay_cache(net, src, crpl, seq, iv_index))
+		return false;
+
+	if (!mesh_model_rx(net->node, szmic, seqAuth, iv_index, net_idx, src,
+						dst, key_aid, data, size))
+		return false;
+
+	/* If message has been handled by us, add to RPL */
+	msg_add_replay_cache(net, src, seq, iv_index);
+	return true;
 }
 
 static uint16_t key_id_to_net_idx(struct mesh_net *net, uint32_t key_id)
@@ -2596,7 +2694,7 @@ static void update_iv_ivu_state(struct mesh_net *net, uint32_t iv_index,
 		mesh_config_write_iv_index(cfg, iv_index, ivu);
 
 		/* Cleanup Replay Protection List NVM */
-		rpl_init(net->node, iv_index);
+		rpl_update(net->node, iv_index);
 	}
 
 	node_property_changed(net->node, "IVIndex");
@@ -3447,95 +3545,6 @@ uint32_t mesh_net_get_instant(struct mesh_net *net)
 	return net->instant;
 }
 
-static bool match_replay_cache(const void *a, const void *b)
-{
-	const struct mesh_rpl *rpe = a;
-	uint16_t src = L_PTR_TO_UINT(b);
-
-	return src == rpe->src;
-}
-
-static bool clean_old_iv_index(void *a, void *b)
-{
-	struct mesh_rpl *rpe = a;
-	uint32_t iv_index = L_PTR_TO_UINT(b);
-
-	if (iv_index < 2)
-		return false;
-
-	if (rpe->iv_index < iv_index - 1) {
-		l_free(rpe);
-		return true;
-	}
-
-	return false;
-}
-
-bool net_msg_check_replay_cache(struct mesh_net *net, uint16_t src,
-				uint16_t crpl, uint32_t seq, uint32_t iv_index)
-{
-	struct mesh_rpl *rpe;
-
-	/* If anything missing reject this message by returning true */
-	if (!net || !net->node)
-		return true;
-
-	if (!net->replay_cache) {
-		net->replay_cache = l_queue_new();
-		rpl_init(net->node, net->iv_index);
-		rpl_get_list(net->node, net->replay_cache);
-	}
-
-	rpe = l_queue_find(net->replay_cache, match_replay_cache,
-						L_UINT_TO_PTR(src));
-
-	if (rpe) {
-		if (iv_index > rpe->iv_index)
-			return false;
-
-		/* Return true if (iv_index | seq) too low */
-		if (iv_index < rpe->iv_index || seq <= rpe->seq) {
-			l_debug("Ignoring replayed packet");
-			return true;
-		}
-	} else if (l_queue_length(net->replay_cache) >= crpl) {
-		/* SRC not in Replay Cache... see if there is space for it */
-
-		int ret = l_queue_foreach_remove(net->replay_cache,
-				clean_old_iv_index, L_UINT_TO_PTR(iv_index));
-
-		/* Return true if no space could be freed */
-		if (!ret)
-			return true;
-	}
-
-	return false;
-}
-
-void net_msg_add_replay_cache(struct mesh_net *net, uint16_t src, uint32_t seq,
-							uint32_t iv_index)
-{
-	struct mesh_rpl *rpe;
-
-	if (!net || !net->replay_cache)
-		return;
-
-	rpe = l_queue_remove_if(net->replay_cache, match_replay_cache,
-						L_UINT_TO_PTR(src));
-
-	if (!rpe) {
-		rpe = l_new(struct mesh_rpl, 1);
-		rpe->src = src;
-	}
-
-	rpe->seq = seq;
-	rpe->iv_index = iv_index;
-	rpl_put_entry(net->node, src, iv_index, seq);
-
-	/* Optimize so that most recent conversations stay earliest in cache */
-	l_queue_push_head(net->replay_cache, rpe);
-}
-
 static void hb_sub_timeout_func(struct l_timeout *timeout, void *user_data)
 {
 	struct mesh_net *net = user_data;
@@ -3687,4 +3696,9 @@ int mesh_net_set_heartbeat_pub(struct mesh_net *net, uint16_t dst,
 
 	/* TODO: Save to node config */
 	return MESH_STATUS_SUCCESS;
+}
+
+bool mesh_net_load_rpl(struct mesh_net *net)
+{
+	return rpl_get_list(net->node, net->replay_cache);
 }
