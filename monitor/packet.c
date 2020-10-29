@@ -88,6 +88,7 @@
 #define COLOR_UNKNOWN_ADV_FLAG		COLOR_WHITE_BG
 #define COLOR_UNKNOWN_PHY		COLOR_WHITE_BG
 #define COLOR_UNKNOWN_ADDED_DEVICE_FLAG	COLOR_WHITE_BG
+#define COLOR_UNKNOWN_ADVMON_FEATURES	COLOR_WHITE_BG
 
 #define COLOR_PHY_PACKET		COLOR_BLUE
 
@@ -13151,6 +13152,102 @@ static void mgmt_set_device_flags_rsp(const void *data, uint16_t size)
 	mgmt_print_address(data, type);
 }
 
+static const struct bitfield_data mgmt_adv_monitor_features_table[] = {
+	{ 1, "OR Patterns"	},
+	{ }
+};
+
+static void mgmt_print_adv_monitor_features(char *label, uint32_t flags)
+{
+	uint32_t mask;
+
+	print_field("%s: 0x%8.8x", label, flags);
+	mask = print_bitfield(2, flags, mgmt_adv_monitor_features_table);
+	if (mask)
+		print_text(COLOR_UNKNOWN_ADVMON_FEATURES,
+			   "  Unknown Flags (0x%8.8x)", mask);
+}
+
+static void mgmt_print_adv_monitor_handles(const void *data, uint8_t len)
+{
+	uint8_t idx = 0;
+
+	while (idx + 2 <= len) {
+		print_field("  Handle: %d", get_le16(data + idx));
+		idx += 2;
+	}
+}
+
+static void mgmt_read_adv_monitor_features_rsp(const void *data, uint16_t size)
+{
+	uint32_t supported_features = get_le32(data);
+	uint32_t enabled_features = get_le32(data + 4);
+	uint16_t max_num_handles = get_le16(data + 8);
+	uint8_t max_num_patterns = get_u8(data + 10);
+	uint16_t num_handles = get_le16(data + 11);
+
+	mgmt_print_adv_monitor_features("Supported Features",
+							supported_features);
+	mgmt_print_adv_monitor_features("Enabled Features",
+							enabled_features);
+	print_field("Max number of handles: %d", max_num_handles);
+	print_field("Max number of patterns: %d", max_num_patterns);
+	print_field("Number of handles: %d", num_handles);
+	mgmt_print_adv_monitor_handles(data + 13, size - 13);
+}
+
+static void mgmt_print_adv_monitor_patterns(const void *data, uint8_t len)
+{
+	uint8_t data_idx = 0, pattern_idx = 1;
+
+	/* Reference: struct mgmt_adv_pattern in lib/mgmt.h. */
+	while (data_idx + 34 <= len) {
+		uint8_t ad_type = get_u8(data + data_idx);
+		uint8_t offset = get_u8(data + data_idx + 1);
+		uint8_t length = get_u8(data + data_idx + 2);
+
+		print_field("  Pattern %d:", pattern_idx);
+		print_field("    AD type: %d", ad_type);
+		print_field("    Offset: %d", offset);
+		print_field("    Length: %d", length);
+		print_hex_field("    Value ", data + data_idx + 3, 31);
+
+		pattern_idx += 1;
+		data_idx += 34;
+	}
+}
+
+static void mgmt_add_adv_monitor_patterns_cmd(const void *data, uint16_t size)
+{
+	uint8_t pattern_count = get_u8(data);
+
+	print_field("Number of patterns: %d", pattern_count);
+	mgmt_print_adv_monitor_patterns(data + 1, size - 1);
+}
+
+static void mgmt_add_adv_monitor_patterns_rsp(const void *data, uint16_t size)
+{
+	uint16_t handle = get_le16(data);
+
+	print_field("Handle: %d", handle);
+}
+
+static void mgmt_remove_adv_monitor_patterns_cmd(const void *data,
+								uint16_t size)
+{
+	uint16_t handle = get_le16(data);
+
+	print_field("Handle: %d", handle);
+}
+
+static void mgmt_remove_adv_monitor_patterns_rsp(const void *data,
+								uint16_t size)
+{
+	uint16_t handle = get_le16(data);
+
+	print_field("Handle: %d", handle);
+}
+
 struct mgmt_data {
 	uint16_t opcode;
 	const char *str;
@@ -13382,6 +13479,15 @@ static const struct mgmt_data mgmt_command_table[] = {
 	{ 0x0050, "Set Device Flags",
 				mgmt_set_device_flags_cmd, 11, true,
 				mgmt_set_device_flags_rsp, 7, true},
+	{ 0x0051, "Read Advertisement Monitor Features",
+				mgmt_null_cmd, 0, true,
+				mgmt_read_adv_monitor_features_rsp, 13, false},
+	{ 0x0052, "Add Advertisement Monitor",
+				mgmt_add_adv_monitor_patterns_cmd, 1, false,
+				mgmt_add_adv_monitor_patterns_rsp, 2, true},
+	{ 0x0053, "Remove Advertisement Monitor",
+				mgmt_remove_adv_monitor_patterns_cmd, 2, true,
+				mgmt_remove_adv_monitor_patterns_rsp, 2, true},
 	{ }
 };
 
@@ -13786,6 +13892,20 @@ static void mgmt_device_flags_changed_evt(const void *data, uint16_t size)
 	mgmt_print_added_device_flags("Current Flags", current_flags);
 }
 
+static void mgmt_adv_monitor_added_evt(const void *data, uint16_t size)
+{
+	uint16_t handle = get_le16(data);
+
+	print_field("Handle: %d", handle);
+}
+
+static void mgmt_adv_monitor_removed_evt(const void *data, uint16_t size)
+{
+	uint16_t handle = get_le16(data);
+
+	print_field("Handle: %d", handle);
+}
+
 static void mgmt_controller_suspend_evt(const void *data, uint16_t size)
 {
 	uint8_t state = get_u8(data);
@@ -13915,6 +14035,10 @@ static const struct mgmt_data mgmt_event_table[] = {
 			mgmt_exp_feature_changed_evt, 20, true },
 	{ 0x002a, "Device Flags Changed",
 			mgmt_device_flags_changed_evt, 15, true },
+	{ 0x002b, "Advertisement Monitor Added",
+			mgmt_adv_monitor_added_evt, 2, true },
+	{ 0x002c, "Advertisement Monitor Added",
+			mgmt_adv_monitor_removed_evt, 2, true },
 	{ 0x002d, "Controller Suspended",
 			mgmt_controller_suspend_evt, 1, true },
 	{ 0x002e, "Controller Resumed",
