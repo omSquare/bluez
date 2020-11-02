@@ -1214,6 +1214,7 @@ void btd_adapter_remove_device(struct btd_adapter *adapter,
 	adapter->connect_list = g_slist_remove(adapter->connect_list, dev);
 
 	adapter->devices = g_slist_remove(adapter->devices, dev);
+	btd_adv_monitor_device_remove(adapter->adv_monitor_manager, dev);
 
 	adapter->discovery_found = g_slist_remove(adapter->discovery_found,
 									dev);
@@ -6566,10 +6567,28 @@ static void update_found_devices(struct btd_adapter *adapter,
 					const uint8_t *data, uint8_t data_len)
 {
 	struct btd_device *dev;
+	struct bt_ad *ad = NULL;
 	struct eir_data eir_data;
 	bool name_known, discoverable;
 	char addr[18];
 	bool duplicate = false;
+	struct queue *matched_monitors = NULL;
+
+	if (bdaddr_type != BDADDR_BREDR)
+		ad = bt_ad_new_with_data(data_len, data);
+
+	/* During the background scanning, update the device only when the data
+	 * match at least one Adv monitor
+	 */
+	if (ad) {
+		matched_monitors = btd_adv_monitor_content_filter(
+					adapter->adv_monitor_manager, ad);
+		bt_ad_unref(ad);
+		ad = NULL;
+	}
+
+	if (!adapter->discovering && !matched_monitors)
+		return;
 
 	memset(&eir_data, 0, sizeof(eir_data));
 	eir_parse(&eir_data, data, data_len);
@@ -6615,18 +6634,22 @@ static void update_found_devices(struct btd_adapter *adapter,
 		device_store_cached_name(dev, eir_data.name);
 
 	/*
-	 * Only skip devices that are not connected, are temporary and there
-	 * is no active discovery session ongoing.
+	 * Only skip devices that are not connected, are temporary, and there
+	 * is no active discovery session ongoing and no matched Adv monitors
 	 */
-	if (!btd_device_is_connected(dev) && (device_is_temporary(dev) &&
-						 !adapter->discovery_list)) {
+	if (!btd_device_is_connected(dev) &&
+		(device_is_temporary(dev) && !adapter->discovery_list) &&
+		!matched_monitors) {
 		eir_data_free(&eir_data);
 		return;
 	}
 
-	/* Don't continue if not discoverable or if filter don't match */
-	if (!discoverable || (adapter->filtered_discovery &&
-	    !is_filter_match(adapter->discovery_list, &eir_data, rssi))) {
+	/* If there is no matched Adv monitors, don't continue if not
+	 * discoverable or if active discovery filter don't match.
+	 */
+	if (!matched_monitors && (!discoverable ||
+		(adapter->filtered_discovery && !is_filter_match(
+				adapter->discovery_list, &eir_data, rssi)))) {
 		eir_data_free(&eir_data);
 		return;
 	}
@@ -6682,6 +6705,14 @@ static void update_found_devices(struct btd_adapter *adapter,
 		device_set_flags(dev, eir_data.flags);
 
 	eir_data_free(&eir_data);
+
+	/* After the device is updated, notify the matched Adv monitors */
+	if (matched_monitors) {
+		btd_adv_monitor_notify_monitors(adapter->adv_monitor_manager,
+						dev, rssi, matched_monitors);
+		queue_destroy(matched_monitors, NULL);
+		matched_monitors = NULL;
+	}
 
 	/*
 	 * Only if at least one client has requested discovery, maintain
@@ -9448,6 +9479,43 @@ failed:
 	btd_adapter_unref(adapter);
 }
 
+static void reset_adv_monitors_complete(uint8_t status, uint16_t length,
+					const void *param, void *user_data)
+{
+	const struct mgmt_rp_remove_adv_monitor *rp = param;
+
+	if (status != MGMT_STATUS_SUCCESS) {
+		error("Failed to reset Adv Monitors: %s (0x%02x)",
+			mgmt_errstr(status), status);
+		return;
+	}
+
+	if (length < sizeof(*rp)) {
+		error("Wrong size of remove Adv Monitor response for reset "
+			"all Adv Monitors");
+		return;
+	}
+
+	DBG("Removed all Adv Monitors");
+}
+
+static void reset_adv_monitors(uint16_t index)
+{
+	struct mgmt_cp_remove_adv_monitor cp;
+
+	DBG("sending remove Adv Monitor command with handle 0");
+
+	/* Handle 0 indicates to remove all */
+	cp.monitor_handle = 0;
+	if (mgmt_send(mgmt_master, MGMT_OP_REMOVE_ADV_MONITOR, index,
+			sizeof(cp), &cp, reset_adv_monitors_complete, NULL,
+			NULL) > 0) {
+		return;
+	}
+
+	error("Failed to reset Adv Monitors");
+}
+
 static void index_added(uint16_t index, uint16_t length, const void *param,
 							void *user_data)
 {
@@ -9461,6 +9529,8 @@ static void index_added(uint16_t index, uint16_t length, const void *param,
 			"Ignoring index added for an already existing adapter");
 		return;
 	}
+
+	reset_adv_monitors(index);
 
 	adapter = btd_adapter_new(index);
 	if (!adapter) {
