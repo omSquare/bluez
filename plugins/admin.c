@@ -67,7 +67,7 @@ static struct btd_admin_policy *admin_policy_new(struct btd_adapter *adapter)
 
 	admin_policy->adapter = adapter;
 	admin_policy->adapter_id = btd_adapter_get_index(adapter);
-	admin_policy->service_allowlist = NULL;
+	admin_policy->service_allowlist = queue_new();
 
 	return admin_policy;
 }
@@ -83,6 +83,17 @@ static void admin_policy_free(void *data)
 
 	free_service_allowlist(admin_policy->service_allowlist);
 	g_free(admin_policy);
+}
+
+static void admin_policy_destroy(struct btd_admin_policy *admin_policy)
+{
+	const char *path = adapter_get_path(admin_policy->adapter);
+
+	g_dbus_unregister_interface(dbus_conn, path,
+						ADMIN_POLICY_SET_INTERFACE);
+	g_dbus_unregister_interface(dbus_conn, path,
+						ADMIN_POLICY_STATUS_INTERFACE);
+	admin_policy_free(admin_policy);
 }
 
 static bool uuid_match(const void *data, const void *match_data)
@@ -324,12 +335,8 @@ static void load_policy_settings(struct btd_admin_policy *admin_policy)
 	char *filename = ADMIN_POLICY_STORAGE;
 	struct stat st;
 
-	if (stat(filename, &st) < 0) {
-		btd_error(admin_policy->adapter_id,
-				"Failed to get file %s information",
-				filename);
-		return;
-	}
+	if (stat(filename, &st) < 0)
+		store_policy_settings(policy_data);
 
 	key_file = g_key_file_new();
 
@@ -492,7 +499,7 @@ static int admin_policy_adapter_probe(struct btd_adapter *adapter)
 	if (!g_dbus_register_interface(dbus_conn, adapter_path,
 					ADMIN_POLICY_SET_INTERFACE,
 					admin_policy_adapter_methods, NULL,
-					NULL, policy_data, admin_policy_free)) {
+					NULL, policy_data, NULL)) {
 		btd_error(policy_data->adapter_id,
 			"Admin Policy Set interface init failed on path %s",
 								adapter_path);
@@ -506,7 +513,7 @@ static int admin_policy_adapter_probe(struct btd_adapter *adapter)
 					ADMIN_POLICY_STATUS_INTERFACE,
 					NULL, NULL,
 					admin_policy_adapter_properties,
-					policy_data, admin_policy_free)) {
+					policy_data, NULL)) {
 		btd_error(policy_data->adapter_id,
 			"Admin Policy Status interface init failed on path %s",
 								adapter_path);
@@ -574,10 +581,24 @@ static void admin_policy_device_removed(struct btd_adapter *adapter,
 		unregister_device_data(data, NULL);
 }
 
+static void admin_policy_remove(struct btd_adapter *adapter)
+{
+	DBG("");
+
+	queue_foreach(devices, unregister_device_data, NULL);
+	queue_destroy(devices, g_free);
+
+	if (policy_data) {
+		admin_policy_destroy(policy_data);
+		policy_data = NULL;
+	}
+}
+
 static struct btd_adapter_driver admin_policy_driver = {
 	.name	= "admin_policy",
 	.probe	= admin_policy_adapter_probe,
 	.resume = NULL,
+	.remove = admin_policy_remove,
 	.device_resolved = admin_policy_device_added,
 	.device_removed = admin_policy_device_removed
 };
@@ -597,11 +618,7 @@ static void admin_exit(void)
 	DBG("");
 
 	btd_unregister_adapter_driver(&admin_policy_driver);
-	queue_foreach(devices, unregister_device_data, NULL);
-	queue_destroy(devices, g_free);
-
-	if (policy_data)
-		admin_policy_free(policy_data);
+	admin_policy_remove(NULL);
 }
 
 BLUETOOTH_PLUGIN_DEFINE(admin, VERSION,
